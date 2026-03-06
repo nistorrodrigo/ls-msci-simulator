@@ -1,5 +1,5 @@
 import { useState, useMemo } from "react";
-import ExcelJS from "exceljs";
+import XLSXStyle from "xlsx-js-style";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 
@@ -69,399 +69,280 @@ const SECTOR_COLORS = {
 const fmt    = (n, d = 1) => n >= 1000 ? `$${(n/1000).toFixed(1)}B` : `$${n.toFixed(d)}M`;
 const fmtPct = (n) => `${(n * 100).toFixed(2)}%`;
 
-// ─── Shared style helpers ─────────────────────────────────────────────────────
-const XL = {
-  NAVY:    "FF000039",
-  BLUE:    "FF1E5AB0",
-  LTBLUE:  "FF3399FF",
-  TEAL:    "FF23A29E",
-  RED:     "FFEF4444",
-  AMBER:   "FFF59E0B",
-  WHITE:   "FFFFFFFF",
-  GRAY:    "FF8A9EB8",
-  LTGRAY:  "FFF4F7FB",
-  MIDGRAY: "FFDBE6F0",
-  TEXT:    "FF1E3A5A",
-  GREEN:   "FF217346",
+// ─── xlsx-js-style helpers ────────────────────────────────────────────────────
+const S = {
+  NAVY:   "000039", BLUE:   "1E5AB0", LTBLUE: "3399FF",
+  TEAL:   "23A29E", RED:    "EF4444", AMBER:  "F59E0B",
+  WHITE:  "FFFFFF", GRAY:   "8A9EB8", LTGRAY: "F4F7FB",
+  MIDGRAY:"DBE6F0", TEXT:   "1E3A5A", GREEN:  "217346",
+  SECTBG: "CCD9F0",
 };
 
-function applyHeaderStyle(cell, bgColor = XL.NAVY) {
-  cell.fill   = { type: "pattern", pattern: "solid", fgColor: { argb: bgColor } };
-  cell.font   = { bold: true, color: { argb: XL.WHITE }, size: 10, name: "Calibri" };
-  cell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
-  cell.border = {
-    top:    { style: "thin", color: { argb: XL.MIDGRAY } },
-    bottom: { style: "thin", color: { argb: XL.MIDGRAY } },
-    left:   { style: "thin", color: { argb: XL.MIDGRAY } },
-    right:  { style: "thin", color: { argb: XL.MIDGRAY } },
-  };
-}
+const border = (style = "thin") => ({
+  top: { style, color: { rgb: S.MIDGRAY } },
+  bottom: { style, color: { rgb: S.MIDGRAY } },
+  left:   { style, color: { rgb: S.MIDGRAY } },
+  right:  { style, color: { rgb: S.MIDGRAY } },
+});
 
-function applyDataStyle(cell, rowIdx, align = "right", bold = false) {
-  const bg = rowIdx % 2 === 0 ? XL.WHITE : XL.LTGRAY;
-  cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: bg } };
-  cell.font = { bold, color: { argb: XL.TEXT }, size: 10, name: "Calibri" };
-  cell.alignment = { horizontal: align, vertical: "middle" };
-  cell.border = {
-    top:    { style: "hair", color: { argb: XL.MIDGRAY } },
-    bottom: { style: "hair", color: { argb: XL.MIDGRAY } },
-    left:   { style: "hair", color: { argb: XL.MIDGRAY } },
-    right:  { style: "hair", color: { argb: XL.MIDGRAY } },
+function cs(value, { bg = S.WHITE, fg = S.TEXT, bold = false, italic = false, sz = 10, align = "center", wrap = false, bord = "thin" } = {}) {
+  return {
+    v: value,
+    t: typeof value === "number" ? "n" : "s",
+    s: {
+      fill:      { fgColor: { rgb: bg } },
+      font:      { bold, italic, color: { rgb: fg }, sz, name: "Calibri" },
+      alignment: { horizontal: align, vertical: "center", wrapText: wrap },
+      border:    border(bord),
+    },
   };
-}
-
-function applyMedianStyle(cell) {
-  cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: XL.NAVY } };
-  cell.font = { bold: true, color: { argb: XL.WHITE }, size: 10, name: "Calibri", italic: true };
-  cell.alignment = { horizontal: "center", vertical: "middle" };
-  cell.border = {
-    top:    { style: "medium", color: { argb: XL.LTBLUE } },
-    bottom: { style: "medium", color: { argb: XL.LTBLUE } },
-    left:   { style: "hair",   color: { argb: XL.MIDGRAY } },
-    right:  { style: "hair",   color: { argb: XL.MIDGRAY } },
-  };
-}
-
-function applySectorLabelStyle(cell) {
-  cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFCCD9F0" } };
-  cell.font = { bold: true, color: { argb: XL.NAVY }, size: 10, name: "Calibri" };
-  cell.alignment = { horizontal: "left", vertical: "middle" };
-  cell.border = {
-    top:    { style: "thin",  color: { argb: XL.NAVY } },
-    bottom: { style: "hair",  color: { argb: XL.MIDGRAY } },
-    left:   { style: "thin",  color: { argb: XL.NAVY } },
-    right:  { style: "hair",  color: { argb: XL.MIDGRAY } },
-  };
-}
-
-function applyTitleStyle(cell) {
-  cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: XL.NAVY } };
-  cell.font = { bold: true, color: { argb: XL.WHITE }, size: 13, name: "Calibri" };
-  cell.alignment = { horizontal: "left", vertical: "middle" };
 }
 
 // ─── Export helpers ───────────────────────────────────────────────────────────
-async function exportExcel({ scenario, cfg, qualified, stocksWithWeights, passiveInflows, activeInflows, totalInflows, effectivePassiveAUM, activeFrac }) {
-  const wb = new ExcelJS.Workbook();
-  wb.creator = "Latin Securities";
-  wb.created = new Date();
-
-  const totalFloatCap = qualified.reduce((a, s) => a + s.floatMktCap, 0);
-  const sortedStocks  = [...STOCKS].sort((a, b) => b.floatMktCap - a.floatMktCap);
+function exportExcel({ scenario, cfg, qualified, stocksWithWeights, passiveInflows, activeInflows, totalInflows, effectivePassiveAUM, activeFrac }) {
+  const wb = XLSXStyle.utils.book_new();
+  const sortedStocks = [...STOCKS].sort((a, b) => b.floatMktCap - a.floatMktCap);
   const sectors = [...new Set(sortedStocks.map(s => s.sector))];
+  const date = new Date().toLocaleDateString("es-AR");
 
-  // ══════════════════════════════════════════════════════
-  // SHEET 1 — CONSTITUENTS (main table like the reference)
-  // ══════════════════════════════════════════════════════
-  const ws1 = wb.addWorksheet("Constituents");
-  ws1.views = [{ showGridLines: false }];
+  // ══════════════════════════════════════════════
+  // SHEET 1 — CONSTITUENTS
+  // ══════════════════════════════════════════════
+  const rows1 = [];
 
-  // Column widths
-  ws1.columns = [
-    { key: "company", width: 26 },
-    { key: "ticker",  width: 11 },
-    { key: "price",   width: 11 },
-    { key: "cap",     width: 11 },
-    { key: "adtv",    width: 10 },
-    { key: "ffloat",  width: 10 },
-    { key: "listing", width: 10 },
-    { key: "wt",      width: 10 },
-    { key: "daysP",   width: 13 },
-    { key: "daysT",   width: 13 },
-    { key: "status",  width: 12 },
-  ];
+  // Title
+  rows1.push([cs(`MSCI Argentina Inclusion Simulator — Latin Securities`, { bg: S.NAVY, fg: S.WHITE, bold: true, sz: 13, align: "left" }), ...Array(10).fill(cs(""))]);
+  rows1.push([cs(`Scenario: ${cfg.label}   |   Passive AUM: $${effectivePassiveAUM}B   |   Active: ${activeFrac.toFixed(1)}x   |   ${date}`, { bg: S.BLUE, fg: S.WHITE, sz: 9, align: "left" }), ...Array(10).fill(cs(""))]);
+  rows1.push(Array(11).fill(cs("")));
 
-  // Title row
-  const titleRow = ws1.addRow(["MSCI Argentina Inclusion Simulator — Latin Securities", "", "", "", "", "", "", "", "", "", ""]);
-  ws1.mergeCells(`A${titleRow.number}:K${titleRow.number}`);
-  applyTitleStyle(titleRow.getCell(1));
-  titleRow.height = 28;
-
-  // Subtitle row
-  const subRow = ws1.addRow([
-    `Scenario: ${cfg.label}   |   Passive AUM: $${effectivePassiveAUM}B   |   Active fraction: ${activeFrac.toFixed(1)}x   |   Generated: ${new Date().toLocaleDateString("es-AR")}`,
-    ...Array(10).fill("")
+  // Header
+  const hdrOpts = { bg: S.NAVY, fg: S.WHITE, bold: true, sz: 9, wrap: true };
+  rows1.push([
+    cs("Company",        { ...hdrOpts, align: "left" }),
+    cs("Ticker",         hdrOpts),
+    cs("Float Cap\n(US$m)", hdrOpts),
+    cs("ADTV\n(US$m)",   hdrOpts),
+    cs("Free\nFloat%",   hdrOpts),
+    cs("Listing",        hdrOpts),
+    cs("Index\nWt.%",    hdrOpts),
+    cs("Days\n(Passive)",hdrOpts),
+    cs("Days\n(Total)",  hdrOpts),
+    cs("Size+ADTV\nOK?", hdrOpts),
+    cs("Status",         hdrOpts),
   ]);
-  ws1.mergeCells(`A${subRow.number}:K${subRow.number}`);
-  subRow.getCell(1).fill  = { type: "pattern", pattern: "solid", fgColor: { argb: XL.BLUE } };
-  subRow.getCell(1).font  = { color: { argb: XL.WHITE }, size: 10, name: "Calibri" };
-  subRow.getCell(1).alignment = { horizontal: "left", vertical: "middle", indent: 1 };
-  subRow.height = 18;
 
-  ws1.addRow([]); // spacer
-
-  // Header row
-  const hdrs = ["Company", "Ticker", "Float Cap\n(US$m)", "ADTV\n(US$m)", "Free\nFloat%", "Listing", "Index\nWeight%", "Days\n(Passive)", "Days\n(Total)", "Min Size\nOK?", "Status"];
-  const hdrRow = ws1.addRow(hdrs);
-  hdrRow.height = 32;
-  hdrRow.eachCell(cell => applyHeaderStyle(cell));
-
-  // Data rows grouped by sector
-  let rowIdx = 0;
+  let ri = 0;
   for (const sector of sectors) {
-    const sectorStocks = sortedStocks.filter(s => s.sector === sector);
-    const eligibleInSector = sectorStocks.filter(s => qualified.find(q => q.ticker === s.ticker));
-    if (sectorStocks.length === 0) continue;
+    const ss = sortedStocks.filter(s => s.sector === sector);
+    if (!ss.length) continue;
 
     // Sector label row
-    const secRow = ws1.addRow([sector, ...Array(10).fill("")]);
-    ws1.mergeCells(`A${secRow.number}:K${secRow.number}`);
-    secRow.eachCell(cell => applySectorLabelStyle(cell));
-    secRow.height = 16;
+    rows1.push([
+      cs(sector, { bg: S.SECTBG, fg: S.NAVY, bold: true, align: "left", bord: "hair" }),
+      ...Array(10).fill(cs("", { bg: S.SECTBG, bord: "hair" })),
+    ]);
 
-    for (const s of sectorStocks) {
+    for (const s of ss) {
       const isIn   = qualified.find(q => q.ticker === s.ticker);
       const sw     = stocksWithWeights.find(q => q.ticker === s.ticker);
       const sizeOk = s.floatMktCap >= cfg.minFloatMktCap;
       const adtvOk = s.adtvM >= cfg.minADTV;
       const pf     = isIn && sw ? passiveInflows * sw.indexWeight : null;
       const tf     = isIn && sw ? totalInflows   * sw.indexWeight : null;
+      const bg     = ri % 2 === 0 ? S.WHITE : S.LTGRAY;
+      const dp     = pf !== null ? pf / s.adtvM : null;
+      const dt     = tf !== null ? tf / s.adtvM : null;
 
-      const dr = ws1.addRow([
-        s.name,
-        s.ticker,
-        s.floatMktCap,
-        s.adtvM,
-        `${(s.freeFlt * 100).toFixed(0)}%`,
-        s.listing,
-        isIn && sw ? parseFloat((sw.indexWeight * 100).toFixed(2)) : "—",
-        pf !== null ? parseFloat((pf / s.adtvM).toFixed(2)) : "—",
-        tf !== null ? parseFloat((tf / s.adtvM).toFixed(2)) : "—",
-        sizeOk && adtvOk ? "✓" : "✗",
-        isIn ? "ELIGIBLE" : (!sizeOk && !adtvOk ? "SIZE+ADTV" : !sizeOk ? "SIZE" : "ADTV"),
+      rows1.push([
+        cs(s.name,                                       { bg, fg: S.TEXT,  align: "left" }),
+        cs(s.ticker,                                     { bg, fg: isIn ? (scenario==="frontier"?S.AMBER:S.TEAL) : S.GRAY, bold: true }),
+        cs(s.floatMktCap,                                { bg, fg: sizeOk ? S.TEXT : S.RED, bold: !sizeOk }),
+        cs(s.adtvM,                                      { bg, fg: adtvOk ? S.TEXT : S.RED, bold: !adtvOk }),
+        cs(`${(s.freeFlt*100).toFixed(0)}%`,             { bg, fg: S.GRAY }),
+        cs(s.listing,                                    { bg, fg: S.GRAY }),
+        cs(isIn && sw ? `${(sw.indexWeight*100).toFixed(2)}%` : "—", { bg, fg: S.TEXT }),
+        cs(dp !== null ? dp.toFixed(2)+"d" : "—",        { bg, fg: dp===null ? S.GRAY : dp>5 ? S.RED : dp>2 ? S.AMBER : S.TEAL, bold: dp!==null }),
+        cs(dt !== null ? dt.toFixed(2)+"d" : "—",        { bg, fg: dt===null ? S.GRAY : dt>5 ? S.RED : dt>2 ? S.AMBER : S.TEAL, bold: dt!==null }),
+        cs(sizeOk && adtvOk ? "✓" : "✗",                { bg, fg: sizeOk && adtvOk ? S.TEAL : S.RED, bold: true }),
+        cs(isIn ? "ELIGIBLE" : (!sizeOk && !adtvOk ? "SIZE+ADTV" : !sizeOk ? "SIZE" : "ADTV"),
+          { bg, fg: isIn ? S.GREEN : S.RED, bold: true }),
       ]);
-      dr.height = 16;
-
-      dr.eachCell((cell, colNum) => {
-        applyDataStyle(cell, rowIdx, colNum === 1 ? "left" : "center");
-      });
-
-      // Color overrides
-      const statusCell = dr.getCell(11);
-      if (isIn) {
-        statusCell.font = { bold: true, color: { argb: XL.GREEN.replace("FF","FF") }, size: 10, name: "Calibri" };
-      } else {
-        statusCell.font = { bold: true, color: { argb: XL.RED }, size: 10, name: "Calibri" };
-      }
-
-      const sizeCell = dr.getCell(10);
-      sizeCell.font = { bold: true, color: { argb: sizeOk && adtvOk ? XL.TEAL : XL.RED }, size: 10, name: "Calibri" };
-      sizeCell.alignment = { horizontal: "center", vertical: "middle" };
-
-      // Color days-of-trading
-      [8, 9].forEach(col => {
-        const val = parseFloat(dr.getCell(col).value);
-        if (!isNaN(val)) {
-          dr.getCell(col).font = { bold: true, size: 10, name: "Calibri",
-            color: { argb: val > 5 ? XL.RED : val > 2 ? XL.AMBER : XL.TEAL }
-          };
-        }
-      });
-
-      // Float cap color
-      dr.getCell(3).font = { bold: sizeOk, size: 10, name: "Calibri",
-        color: { argb: sizeOk ? XL.TEXT : XL.RED }
-      };
-      dr.getCell(4).font = { bold: adtvOk, size: 10, name: "Calibri",
-        color: { argb: adtvOk ? XL.TEXT : XL.RED }
-      };
-
-      rowIdx++;
+      ri++;
     }
 
     // Sector median row (eligible only)
-    if (eligibleInSector.length > 0) {
-      const medianCap  = eligibleInSector.map(s => s.floatMktCap).sort((a,b)=>a-b);
-      const medianAdtv = eligibleInSector.map(s => s.adtvM).sort((a,b)=>a-b);
-      const mid = i => i[Math.floor(i.length/2)];
-      const medRow = ws1.addRow([
-        `${sector} Median`, "", mid(medianCap), mid(medianAdtv),
-        "", "", "", "", "", "", `${eligibleInSector.length} eligible`,
+    const elSec = ss.filter(s => qualified.find(q => q.ticker === s.ticker));
+    if (elSec.length) {
+      const mCap  = [...elSec.map(s=>s.floatMktCap)].sort((a,b)=>a-b);
+      const mAdtv = [...elSec.map(s=>s.adtvM)].sort((a,b)=>a-b);
+      const mid = arr => arr[Math.floor(arr.length/2)];
+      rows1.push([
+        cs(`${sector} Median`, { bg: S.NAVY, fg: S.WHITE, bold: true, italic: true, align: "left" }),
+        cs("",                 { bg: S.NAVY }),
+        cs(mid(mCap),          { bg: S.NAVY, fg: S.LTBLUE, bold: true }),
+        cs(mid(mAdtv),         { bg: S.NAVY, fg: S.LTBLUE, bold: true }),
+        ...Array(6).fill(cs("", { bg: S.NAVY })),
+        cs(`${elSec.length} eligible`, { bg: S.NAVY, fg: S.AMBER, bold: true }),
       ]);
-      medRow.height = 17;
-      medRow.eachCell(cell => applyMedianStyle(cell));
-      medRow.getCell(11).font = { bold: true, italic: true, color: { argb: XL.AMBER }, size: 10, name: "Calibri" };
-      rowIdx++;
     }
   }
 
-  // Freeze header rows
-  ws1.views[0].state = "frozen";
-  ws1.views[0].ySplit = 4;
-
-  // ══════════════════════════════════════════════════════
-  // SHEET 2 — FLOW ESTIMATES
-  // ══════════════════════════════════════════════════════
-  const ws2 = wb.addWorksheet("Flow Estimates");
-  ws2.views = [{ showGridLines: false }];
-  ws2.columns = [
-    { key: "company", width: 26 },
-    { key: "ticker",  width: 10 },
-    { key: "wt",      width: 12 },
-    { key: "passive", width: 16 },
-    { key: "active",  width: 16 },
-    { key: "total",   width: 16 },
-    { key: "daysP",   width: 15 },
-    { key: "daysT",   width: 15 },
+  const ws1 = XLSXStyle.utils.aoa_to_sheet(rows1);
+  ws1["!cols"] = [{ wch: 28 }, { wch: 10 }, { wch: 14 }, { wch: 12 }, { wch: 10 }, { wch: 10 }, { wch: 11 }, { wch: 14 }, { wch: 14 }, { wch: 12 }, { wch: 13 }];
+  ws1["!rows"] = [{ hpt: 24 }, { hpt: 16 }, { hpt: 4 }, { hpt: 28 }];
+  ws1["!merges"] = [
+    { s: { r: 0, c: 0 }, e: { r: 0, c: 10 } },
+    { s: { r: 1, c: 0 }, e: { r: 1, c: 10 } },
   ];
+  XLSXStyle.utils.book_append_sheet(wb, ws1, "Constituents");
 
-  const t2 = ws2.addRow(["MSCI Argentina — Flow Estimates by Constituent", ...Array(7).fill("")]);
-  ws2.mergeCells(`A${t2.number}:H${t2.number}`);
-  applyTitleStyle(t2.getCell(1)); t2.height = 28;
+  // ══════════════════════════════════════════════
+  // SHEET 2 — FLOW ESTIMATES
+  // ══════════════════════════════════════════════
+  const rows2 = [];
+  rows2.push([cs("MSCI Argentina — Flow Estimates by Constituent", { bg: S.NAVY, fg: S.WHITE, bold: true, sz: 13, align: "left" }), ...Array(7).fill(cs(""))]);
+  rows2.push([cs(`Scenario: ${cfg.label}   |   Passive AUM: $${effectivePassiveAUM}B   |   Active: ${activeFrac.toFixed(1)}x   |   Total flows: $${totalInflows.toFixed(0)}M`, { bg: S.BLUE, fg: S.WHITE, sz: 9, align: "left" }), ...Array(7).fill(cs(""))]);
+  rows2.push(Array(8).fill(cs("")));
 
-  const s2 = ws2.addRow([
-    `Scenario: ${cfg.label}   |   Passive AUM: $${effectivePassiveAUM}B   |   Active fraction: ${activeFrac.toFixed(1)}x   |   Total flows: $${totalInflows.toFixed(0)}M`,
-    ...Array(7).fill("")
+  const hdr2 = { bg: S.NAVY, fg: S.WHITE, bold: true, sz: 9, wrap: true };
+  rows2.push([
+    cs("Company",                 { ...hdr2, align: "left" }),
+    cs("Ticker",                  hdr2),
+    cs("Index Wt.\n(%)",          hdr2),
+    cs("Passive Inflow\n(US$m)",  hdr2),
+    cs("Active Inflow\n(US$m)",   hdr2),
+    cs("Total Inflow\n(US$m)",    hdr2),
+    cs("Days of Trading\n(Passive)", hdr2),
+    cs("Days of Trading\n(Total)", hdr2),
   ]);
-  ws2.mergeCells(`A${s2.number}:H${s2.number}`);
-  s2.getCell(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: XL.BLUE } };
-  s2.getCell(1).font = { color: { argb: XL.WHITE }, size: 10, name: "Calibri" };
-  s2.getCell(1).alignment = { horizontal: "left", vertical: "middle", indent: 1 };
-  s2.height = 18;
-  ws2.addRow([]);
-
-  const h2 = ws2.addRow(["Company", "Ticker", "Index Wt.\n(%)", "Passive Inflow\n(US$m)", "Active Inflow\n(US$m)", "Total Inflow\n(US$m)", "Days of Trading\n(Passive)", "Days of Trading\n(Total)"]);
-  h2.height = 32;
-  h2.eachCell(cell => applyHeaderStyle(cell));
 
   let ri2 = 0;
   [...stocksWithWeights].sort((a, b) => b.floatMktCap - a.floatMktCap).forEach(s => {
     const pf = passiveInflows * s.indexWeight;
     const af = activeInflows  * s.indexWeight;
     const tf = totalInflows   * s.indexWeight;
-    const dr = ws2.addRow([
-      s.name, s.ticker,
-      parseFloat((s.indexWeight * 100).toFixed(2)),
-      parseFloat(pf.toFixed(1)),
-      parseFloat(af.toFixed(1)),
-      parseFloat(tf.toFixed(1)),
-      parseFloat((pf / s.adtvM).toFixed(2)),
-      parseFloat((tf / s.adtvM).toFixed(2)),
+    const dp = pf / s.adtvM, dt = tf / s.adtvM;
+    const bg = ri2 % 2 === 0 ? S.WHITE : S.LTGRAY;
+    rows2.push([
+      cs(s.name,                       { bg, fg: S.TEXT, align: "left" }),
+      cs(s.ticker,                     { bg, fg: scenario==="frontier"?S.AMBER:S.TEAL, bold: true }),
+      cs(`${(s.indexWeight*100).toFixed(2)}%`, { bg }),
+      cs(`$${pf.toFixed(1)}M`,         { bg, fg: S.LTBLUE }),
+      cs(`$${af.toFixed(1)}M`,         { bg, fg: S.BLUE }),
+      cs(`$${tf.toFixed(1)}M`,         { bg, fg: scenario==="frontier"?S.AMBER:S.TEAL, bold: true }),
+      cs(dp.toFixed(2)+"d",            { bg, fg: dp>3?S.RED:dp>1.5?S.AMBER:S.TEAL, bold: true }),
+      cs(dt.toFixed(2)+"d",            { bg, fg: dt>5?S.RED:dt>2?S.AMBER:S.TEAL,   bold: true }),
     ]);
-    dr.height = 16;
-    dr.eachCell((cell, col) => applyDataStyle(cell, ri2, col === 1 ? "left" : "center"));
-    dr.getCell(4).font = { bold: false, color: { argb: XL.LTBLUE.replace("FF","FF") }, size: 10, name: "Calibri" };
-    dr.getCell(5).font = { bold: false, color: { argb: XL.BLUE  }, size: 10, name: "Calibri" };
-    dr.getCell(6).font = { bold: true,  color: { argb: XL.NAVY  }, size: 10, name: "Calibri" };
-    const dp = parseFloat((pf / s.adtvM).toFixed(2));
-    const dt = parseFloat((tf / s.adtvM).toFixed(2));
-    dr.getCell(7).font = { bold: true, size: 10, name: "Calibri", color: { argb: dp>3?XL.RED:dp>1.5?XL.AMBER:XL.TEAL }};
-    dr.getCell(8).font = { bold: true, size: 10, name: "Calibri", color: { argb: dt>5?XL.RED:dt>2?XL.AMBER:XL.TEAL }};
     ri2++;
   });
 
   // Total row
-  const totRow = ws2.addRow([
-    "TOTAL", "",
-    100,
-    parseFloat(passiveInflows.toFixed(1)),
-    parseFloat(activeInflows.toFixed(1)),
-    parseFloat(totalInflows.toFixed(1)),
-    "", ""
+  rows2.push([
+    cs("TOTAL", { bg: S.NAVY, fg: S.WHITE, bold: true, align: "left" }),
+    cs("",      { bg: S.NAVY }),
+    cs("100.00%",{ bg: S.NAVY, fg: S.WHITE, bold: true }),
+    cs(`$${passiveInflows.toFixed(1)}M`, { bg: S.NAVY, fg: S.LTBLUE, bold: true }),
+    cs(`$${activeInflows.toFixed(1)}M`,  { bg: S.NAVY, fg: "ADD4FF",  bold: true }),
+    cs(`$${totalInflows.toFixed(1)}M`,   { bg: S.NAVY, fg: S.AMBER,   bold: true }),
+    cs("", { bg: S.NAVY }),
+    cs("", { bg: S.NAVY }),
   ]);
-  totRow.height = 18;
-  totRow.eachCell(cell => applyMedianStyle(cell));
-  totRow.getCell(4).font = { bold: true, color: { argb: XL.LTBLUE }, size: 10, name: "Calibri" };
-  totRow.getCell(5).font = { bold: true, color: { argb: "FFADD4FF" }, size: 10, name: "Calibri" };
-  totRow.getCell(6).font = { bold: true, color: { argb: XL.AMBER  }, size: 10, name: "Calibri" };
 
-  ws2.views[0].state = "frozen";
-  ws2.views[0].ySplit = 4;
+  const ws2 = XLSXStyle.utils.aoa_to_sheet(rows2);
+  ws2["!cols"] = [{ wch: 28 }, { wch: 10 }, { wch: 12 }, { wch: 18 }, { wch: 18 }, { wch: 18 }, { wch: 18 }, { wch: 18 }];
+  ws2["!merges"] = [
+    { s: { r: 0, c: 0 }, e: { r: 0, c: 7 } },
+    { s: { r: 1, c: 0 }, e: { r: 1, c: 7 } },
+  ];
+  XLSXStyle.utils.book_append_sheet(wb, ws2, "Flow Estimates");
 
-  // ══════════════════════════════════════════════════════
-  // SHEET 3 — SUMMARY / PARAMETERS
-  // ══════════════════════════════════════════════════════
-  const ws3 = wb.addWorksheet("Summary");
-  ws3.views = [{ showGridLines: false }];
-  ws3.columns = [{ width: 28 }, { width: 22 }, { width: 14 }];
+  // ══════════════════════════════════════════════
+  // SHEET 3 — SUMMARY
+  // ══════════════════════════════════════════════
+  const rows3 = [];
+  rows3.push([cs("MSCI Argentina — Parameters & Flow Summary", { bg: S.NAVY, fg: S.WHITE, bold: true, sz: 13, align: "left" }), cs("", { bg: S.NAVY })]);
+  rows3.push([cs("", { bg: S.BLUE }), cs("")]);
 
-  const addParam = (label, value, bold = false) => {
-    const r = ws3.addRow([label, value, ""]);
-    r.height = 17;
-    r.getCell(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: XL.LTGRAY } };
-    r.getCell(1).font = { color: { argb: XL.GRAY }, size: 10, name: "Calibri" };
-    r.getCell(1).border = { bottom: { style: "hair", color: { argb: XL.MIDGRAY } } };
-    r.getCell(1).alignment = { horizontal: "left", vertical: "middle", indent: 1 };
-    r.getCell(2).font = { bold, color: { argb: XL.NAVY }, size: 11, name: "Calibri" };
-    r.getCell(2).alignment = { horizontal: "left", vertical: "middle" };
-    r.getCell(2).border = { bottom: { style: "hair", color: { argb: XL.MIDGRAY } } };
+  const addParam3 = (label, value, boldVal = false) => {
+    rows3.push([
+      cs(label, { bg: S.LTGRAY, fg: S.GRAY, align: "left" }),
+      cs(value,  { fg: boldVal ? S.NAVY : S.TEXT, bold: boldVal, align: "left" }),
+    ]);
   };
 
-  const t3 = ws3.addRow(["MSCI Argentina Simulation — Parameters & Flows", "", ""]);
-  ws3.mergeCells(`A${t3.number}:C${t3.number}`);
-  applyTitleStyle(t3.getCell(1)); t3.height = 28;
-  ws3.addRow([]);
+  rows3.push([cs(""), cs("")]);
+  addParam3("SCENARIO",               cfg.label,                                  true);
+  addParam3("Timeline",               cfg.timeline);
+  addParam3("Passive AUM tracked",    `$${effectivePassiveAUM}B`);
+  addParam3("Argentina est. weight",  `${(cfg.argWeight*100).toFixed(3)}%`);
+  addParam3("Active / Passive fraction", `${activeFrac.toFixed(2)}x`);
+  addParam3("Min Float Mkt Cap",      `$${cfg.minFloatMktCap >= 1000 ? (cfg.minFloatMktCap/1000).toFixed(1)+"B" : cfg.minFloatMktCap+"M"}`);
+  addParam3("Min ADTV (3M avg)",      `$${cfg.minADTV}M / day`);
+  addParam3("Eligible constituents",  `${qualified.length} of ${STOCKS.length}`);
 
-  addParam("SCENARIO",              cfg.label, true);
-  addParam("Timeline",              cfg.timeline);
-  addParam("Passive AUM tracked",   `$${effectivePassiveAUM}B`);
-  addParam("Argentina est. weight", `${(cfg.argWeight * 100).toFixed(3)}%`);
-  addParam("Active / Passive fraction", `${activeFrac.toFixed(2)}×`);
-  addParam("Min Float Mkt Cap",     `$${cfg.minFloatMktCap >= 1000 ? (cfg.minFloatMktCap/1000).toFixed(1)+"B" : cfg.minFloatMktCap+"M"}`);
-  addParam("Min ADTV (3M avg)",     `$${cfg.minADTV}M / day`);
-  addParam("Eligible constituents", `${qualified.length} of ${STOCKS.length}`);
-  ws3.addRow([]);
+  rows3.push([cs("FLOW ESTIMATES", { bg: S.BLUE, fg: S.WHITE, bold: true, align: "left" }), cs("", { bg: S.BLUE })]);
+  addParam3("Passive Inflows",        `$${passiveInflows.toFixed(0)}M`);
+  addParam3("Active Inflows",         `$${activeInflows.toFixed(0)}M`);
+  addParam3("Total Inflows",          `$${totalInflows.toFixed(0)}M`,  true);
+  addParam3("Analyst consensus range",`$${(cfg.total_flows_low/1000).toFixed(1)}B – $${(cfg.total_flows_high/1000).toFixed(1)}B`);
 
-  const fhRow = ws3.addRow(["FLOW ESTIMATES", "", ""]);
-  ws3.mergeCells(`A${fhRow.number}:C${fhRow.number}`);
-  fhRow.getCell(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: XL.BLUE } };
-  fhRow.getCell(1).font = { bold: true, color: { argb: XL.WHITE }, size: 10, name: "Calibri" };
-  fhRow.getCell(1).alignment = { horizontal: "left", vertical: "middle", indent: 1 };
-  fhRow.height = 18;
+  const ws3 = XLSXStyle.utils.aoa_to_sheet(rows3);
+  ws3["!cols"] = [{ wch: 28 }, { wch: 24 }];
+  ws3["!merges"] = [
+    { s: { r: 0, c: 0 }, e: { r: 0, c: 1 } },
+    { s: { r: 1, c: 0 }, e: { r: 1, c: 1 } },
+  ];
+  XLSXStyle.utils.book_append_sheet(wb, ws3, "Summary");
 
-  addParam("Passive Inflows", `$${passiveInflows.toFixed(0)}M`);
-  addParam("Active Inflows",  `$${activeInflows.toFixed(0)}M`);
-  addParam("Total Inflows",   `$${totalInflows.toFixed(0)}M`, true);
-  addParam("Analyst consensus range", `$${(cfg.total_flows_low/1000).toFixed(1)}B – $${(cfg.total_flows_high/1000).toFixed(1)}B`);
-
-  // ══════════════════════════════════════════════════════
+  // ══════════════════════════════════════════════
   // SHEET 4 — PRECEDENTS
-  // ══════════════════════════════════════════════════════
-  const ws4 = wb.addWorksheet("Precedents");
-  ws4.views = [{ showGridLines: false }];
-  ws4.columns = [
-    { width: 16 }, { width: 10 }, { width: 8 },
-    { width: 15 }, { width: 15 }, { width: 14 }, { width: 40 }
-  ];
+  // ══════════════════════════════════════════════
+  const rows4 = [];
+  rows4.push([cs("MSCI Reclassification — Historical Precedents", { bg: S.NAVY, fg: S.WHITE, bold: true, sz: 13, align: "left" }), ...Array(6).fill(cs("", { bg: S.NAVY }))]);
+  rows4.push(Array(7).fill(cs("")));
 
-  const t4 = ws4.addRow(["MSCI Reclassification Historical Precedents", "", "", "", "", "", ""]);
-  ws4.mergeCells(`A${t4.number}:G${t4.number}`);
-  applyTitleStyle(t4.getCell(1)); t4.height = 28;
-  ws4.addRow([]);
+  const hdr4 = { bg: S.NAVY, fg: S.WHITE, bold: true, sz: 9 };
+  rows4.push([
+    cs("Country",        { ...hdr4, align: "left" }),
+    cs("Direction",      hdr4),
+    cs("Year",           hdr4),
+    cs("Passive Inflows",hdr4),
+    cs("Active Inflows", hdr4),
+    cs("Total",          hdr4),
+    cs("Notes",          { ...hdr4, align: "left" }),
+  ]);
 
-  const h4 = ws4.addRow(["Country", "Direction", "Year", "Passive Inflows", "Active Inflows", "Total", "Notes"]);
-  h4.height = 22;
-  h4.eachCell(cell => applyHeaderStyle(cell));
-
-  const precData = [
-    ["Argentina",    "FM→EM", 2019, "$500M",     "$1.2B",   "$1.7B",     "Prior EM inclusion — capital controls reintroduced 2019"],
-    ["Saudi Arabia", "FM→EM", 2019, "$10B",       "$30B",    "$40B",      "ARAMCO IPO; phased over 2 SAIR cycles"],
-    ["Kuwait",       "FM→EM", 2019, "$2.5B",      "$5B",     "$7.5B",     "Gradual rebalancing; high domestic liquidity"],
-    ["UAE / Qatar",  "FM→EM", 2014, "$1B ea.",    "$2B ea.", "$3B ea.",   "Dual listing structure facilitated flows"],
-    ["Pakistan",     "FM→EM", 2017, "$600M",      "$1B",     "$1.6B",     "Downgraded back to FM in 2021"],
-    ["Greece",       "EM→DM", 2013, "$1.2B out",  "$2B out", "$3.2B out", "Outflows due to downgrade"],
-  ];
-  precData.forEach((row, ri) => {
-    const dr = ws4.addRow(row);
-    dr.height = 17;
-    dr.eachCell((cell, col) => applyDataStyle(cell, ri, col <= 2 ? "left" : "center"));
-    // Argentina highlight
-    if (ri === 0) {
-      dr.getCell(1).font = { bold: true, color: { argb: XL.TEAL }, size: 10, name: "Calibri" };
-      dr.getCell(6).font = { bold: true, color: { argb: XL.TEAL }, size: 10, name: "Calibri" };
-    }
-    // Direction badge color
-    const dir = row[1];
-    dr.getCell(2).font = {
-      bold: true, size: 10, name: "Calibri",
-      color: { argb: dir.includes("DM") ? XL.RED : XL.TEAL }
-    };
+  [
+    ["Argentina",   "FM→EM", "2019", "$500M",    "$1.2B",   "$1.7B",    "Prior EM inclusion — capital controls reintroduced 2019"],
+    ["Saudi Arabia","FM→EM", "2019", "$10B",     "$30B",    "$40B",     "ARAMCO IPO; phased over 2 SAIR cycles"],
+    ["Kuwait",      "FM→EM", "2019", "$2.5B",    "$5B",     "$7.5B",    "Gradual rebalancing; high domestic liquidity"],
+    ["UAE / Qatar", "FM→EM", "2014", "$1B ea.",  "$2B ea.", "$3B ea.",  "Dual listing structure facilitated flows"],
+    ["Pakistan",    "FM→EM", "2017", "$600M",    "$1B",     "$1.6B",    "Downgraded back to FM in 2021"],
+    ["Greece",      "EM→DM", "2013", "$1.2B out","$2B out", "$3.2B out","Outflows due to downgrade"],
+  ].forEach((row, ri) => {
+    const bg = ri % 2 === 0 ? S.WHITE : S.LTGRAY;
+    const isArg = row[0] === "Argentina";
+    const isDM  = row[1].includes("DM");
+    rows4.push([
+      cs(row[0], { bg, fg: isArg ? S.TEAL : S.TEXT, bold: isArg, align: "left" }),
+      cs(row[1], { bg, fg: isDM ? S.RED : S.TEAL, bold: true }),
+      cs(row[2], { bg, fg: S.GRAY }),
+      cs(row[3], { bg, fg: S.LTBLUE }),
+      cs(row[4], { bg, fg: S.BLUE }),
+      cs(row[5], { bg, fg: isArg ? S.TEAL : S.NAVY, bold: isArg }),
+      cs(row[6], { bg, fg: S.GRAY, align: "left" }),
+    ]);
   });
 
-  // ── Generate and download ──
-  const buffer = await wb.xlsx.writeBuffer();
+  const ws4 = XLSXStyle.utils.aoa_to_sheet(rows4);
+  ws4["!cols"] = [{ wch: 14 }, { wch: 10 }, { wch: 7 }, { wch: 16 }, { wch: 16 }, { wch: 14 }, { wch: 44 }];
+  ws4["!merges"] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 6 } }];
+  XLSXStyle.utils.book_append_sheet(wb, ws4, "Precedents");
+
+  // ── Download ──
+  const wbout = XLSXStyle.write(wb, { bookType: "xlsx", type: "array" });
   downloadBlob(
-    new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }),
+    new Blob([wbout], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }),
     `LS_MSCI_Argentina_${scenario}_${new Date().toISOString().slice(0,10)}.xlsx`
   );
 }
