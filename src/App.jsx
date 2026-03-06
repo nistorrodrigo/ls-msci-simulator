@@ -1,5 +1,5 @@
 import { useState, useMemo } from "react";
-import * as XLSX from "xlsx";
+import ExcelJS from "exceljs";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 
@@ -69,255 +69,742 @@ const SECTOR_COLORS = {
 const fmt    = (n, d = 1) => n >= 1000 ? `$${(n/1000).toFixed(1)}B` : `$${n.toFixed(d)}M`;
 const fmtPct = (n) => `${(n * 100).toFixed(2)}%`;
 
+// ─── Shared style helpers ─────────────────────────────────────────────────────
+const XL = {
+  NAVY:    "FF000039",
+  BLUE:    "FF1E5AB0",
+  LTBLUE:  "FF3399FF",
+  TEAL:    "FF23A29E",
+  RED:     "FFEF4444",
+  AMBER:   "FFF59E0B",
+  WHITE:   "FFFFFFFF",
+  GRAY:    "FF8A9EB8",
+  LTGRAY:  "FFF4F7FB",
+  MIDGRAY: "FFDBE6F0",
+  TEXT:    "FF1E3A5A",
+  GREEN:   "FF217346",
+};
+
+function applyHeaderStyle(cell, bgColor = XL.NAVY) {
+  cell.fill   = { type: "pattern", pattern: "solid", fgColor: { argb: bgColor } };
+  cell.font   = { bold: true, color: { argb: XL.WHITE }, size: 10, name: "Calibri" };
+  cell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
+  cell.border = {
+    top:    { style: "thin", color: { argb: XL.MIDGRAY } },
+    bottom: { style: "thin", color: { argb: XL.MIDGRAY } },
+    left:   { style: "thin", color: { argb: XL.MIDGRAY } },
+    right:  { style: "thin", color: { argb: XL.MIDGRAY } },
+  };
+}
+
+function applyDataStyle(cell, rowIdx, align = "right", bold = false) {
+  const bg = rowIdx % 2 === 0 ? XL.WHITE : XL.LTGRAY;
+  cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: bg } };
+  cell.font = { bold, color: { argb: XL.TEXT }, size: 10, name: "Calibri" };
+  cell.alignment = { horizontal: align, vertical: "middle" };
+  cell.border = {
+    top:    { style: "hair", color: { argb: XL.MIDGRAY } },
+    bottom: { style: "hair", color: { argb: XL.MIDGRAY } },
+    left:   { style: "hair", color: { argb: XL.MIDGRAY } },
+    right:  { style: "hair", color: { argb: XL.MIDGRAY } },
+  };
+}
+
+function applyMedianStyle(cell) {
+  cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: XL.NAVY } };
+  cell.font = { bold: true, color: { argb: XL.WHITE }, size: 10, name: "Calibri", italic: true };
+  cell.alignment = { horizontal: "center", vertical: "middle" };
+  cell.border = {
+    top:    { style: "medium", color: { argb: XL.LTBLUE } },
+    bottom: { style: "medium", color: { argb: XL.LTBLUE } },
+    left:   { style: "hair",   color: { argb: XL.MIDGRAY } },
+    right:  { style: "hair",   color: { argb: XL.MIDGRAY } },
+  };
+}
+
+function applySectorLabelStyle(cell) {
+  cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFCCD9F0" } };
+  cell.font = { bold: true, color: { argb: XL.NAVY }, size: 10, name: "Calibri" };
+  cell.alignment = { horizontal: "left", vertical: "middle" };
+  cell.border = {
+    top:    { style: "thin",  color: { argb: XL.NAVY } },
+    bottom: { style: "hair",  color: { argb: XL.MIDGRAY } },
+    left:   { style: "thin",  color: { argb: XL.NAVY } },
+    right:  { style: "hair",  color: { argb: XL.MIDGRAY } },
+  };
+}
+
+function applyTitleStyle(cell) {
+  cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: XL.NAVY } };
+  cell.font = { bold: true, color: { argb: XL.WHITE }, size: 13, name: "Calibri" };
+  cell.alignment = { horizontal: "left", vertical: "middle" };
+}
+
 // ─── Export helpers ───────────────────────────────────────────────────────────
-function exportExcel({ scenario, cfg, qualified, stocksWithWeights, passiveInflows, activeInflows, totalInflows, effectivePassiveAUM, activeFrac }) {
-  const wb = XLSX.utils.book_new();
+async function exportExcel({ scenario, cfg, qualified, stocksWithWeights, passiveInflows, activeInflows, totalInflows, effectivePassiveAUM, activeFrac }) {
+  const wb = new ExcelJS.Workbook();
+  wb.creator = "Latin Securities";
+  wb.created = new Date();
 
-  // Sheet 1 — Summary
-  const summaryData = [
-    ["MSCI Argentina Inclusion Simulator", "", ""],
-    ["Latin Securities — Research Tool", "", ""],
-    ["Generated", new Date().toLocaleDateString("es-AR"), ""],
-    ["", "", ""],
-    ["SCENARIO", cfg.label, ""],
-    ["Timeline", cfg.timeline, ""],
-    ["Passive AUM tracked", `$${effectivePassiveAUM}B`, ""],
-    ["Argentina est. weight", `${(cfg.argWeight * 100).toFixed(3)}%`, ""],
-    ["Active/Passive fraction", `${activeFrac.toFixed(2)}×`, ""],
-    ["", "", ""],
-    ["FLOW ESTIMATES", "", ""],
-    ["Passive Inflows", `$${passiveInflows.toFixed(0)}M`, ""],
-    ["Active Inflows",  `$${activeInflows.toFixed(0)}M`, ""],
-    ["Total Inflows",   `$${totalInflows.toFixed(0)}M`, ""],
-    ["Analyst range",   `$${(cfg.total_flows_low/1000).toFixed(1)}B – $${(cfg.total_flows_high/1000).toFixed(1)}B`, ""],
-    ["", "", ""],
-    ["ELIGIBILITY THRESHOLDS", "", ""],
-    ["Min Float Mkt Cap", `$${cfg.minFloatMktCap >= 1000 ? (cfg.minFloatMktCap/1000).toFixed(1)+"B" : cfg.minFloatMktCap+"M"}`, ""],
-    ["Min ADTV (3M)",    `$${cfg.minADTV}M/day`, ""],
-  ];
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(summaryData), "Summary");
-
-  // Sheet 2 — Constituents
   const totalFloatCap = qualified.reduce((a, s) => a + s.floatMktCap, 0);
-  const constituentRows = [
-    ["Ticker", "Company", "Sector", "Float Mkt Cap (USD M)", "ADTV 3M (USD M)", "Free Float %", "Listing", "Est. Index Weight %", "Days of Trading (Passive)", "Days of Trading (Total)", "Status"],
-  ];
-  STOCKS.sort((a, b) => b.floatMktCap - a.floatMktCap).forEach(s => {
-    const isIn = qualified.find(q => q.ticker === s.ticker);
-    const sw   = stocksWithWeights.find(q => q.ticker === s.ticker);
-    const sizeOk = s.floatMktCap >= cfg.minFloatMktCap;
-    const adtvOk = s.adtvM >= cfg.minADTV;
-    const passFlow  = isIn && sw ? passiveInflows * sw.indexWeight : 0;
-    const totalFlow = isIn && sw ? totalInflows * sw.indexWeight : 0;
-    constituentRows.push([
-      s.ticker, s.name, s.sector,
-      s.floatMktCap, s.adtvM,
-      `${(s.freeFlt * 100).toFixed(0)}%`,
-      s.listing,
-      isIn && sw ? `${(sw.indexWeight * 100).toFixed(2)}%` : "—",
-      isIn && sw ? (passFlow / s.adtvM).toFixed(2) : "—",
-      isIn && sw ? (totalFlow / s.adtvM).toFixed(2) : "—",
-      isIn ? "ELIGIBLE" : (!sizeOk && !adtvOk ? "SIZE+ADTV" : !sizeOk ? "SIZE" : "ADTV"),
-    ]);
-  });
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(constituentRows), "Constituents");
+  const sortedStocks  = [...STOCKS].sort((a, b) => b.floatMktCap - a.floatMktCap);
+  const sectors = [...new Set(sortedStocks.map(s => s.sector))];
 
-  // Sheet 3 — Flow Breakdown
-  const flowRows = [
-    ["Ticker", "Company", "Index Weight %", "Passive Inflow (USD M)", "Active Inflow (USD M)", "Total Inflow (USD M)", "Days of Trading (Passive)", "Days of Trading (Total)"],
+  // ══════════════════════════════════════════════════════
+  // SHEET 1 — CONSTITUENTS (main table like the reference)
+  // ══════════════════════════════════════════════════════
+  const ws1 = wb.addWorksheet("Constituents");
+  ws1.views = [{ showGridLines: false }];
+
+  // Column widths
+  ws1.columns = [
+    { key: "company", width: 26 },
+    { key: "ticker",  width: 11 },
+    { key: "price",   width: 11 },
+    { key: "cap",     width: 11 },
+    { key: "adtv",    width: 10 },
+    { key: "ffloat",  width: 10 },
+    { key: "listing", width: 10 },
+    { key: "wt",      width: 10 },
+    { key: "daysP",   width: 13 },
+    { key: "daysT",   width: 13 },
+    { key: "status",  width: 12 },
   ];
-  stocksWithWeights.sort((a, b) => b.floatMktCap - a.floatMktCap).forEach(s => {
+
+  // Title row
+  const titleRow = ws1.addRow(["MSCI Argentina Inclusion Simulator — Latin Securities", "", "", "", "", "", "", "", "", "", ""]);
+  ws1.mergeCells(`A${titleRow.number}:K${titleRow.number}`);
+  applyTitleStyle(titleRow.getCell(1));
+  titleRow.height = 28;
+
+  // Subtitle row
+  const subRow = ws1.addRow([
+    `Scenario: ${cfg.label}   |   Passive AUM: $${effectivePassiveAUM}B   |   Active fraction: ${activeFrac.toFixed(1)}x   |   Generated: ${new Date().toLocaleDateString("es-AR")}`,
+    ...Array(10).fill("")
+  ]);
+  ws1.mergeCells(`A${subRow.number}:K${subRow.number}`);
+  subRow.getCell(1).fill  = { type: "pattern", pattern: "solid", fgColor: { argb: XL.BLUE } };
+  subRow.getCell(1).font  = { color: { argb: XL.WHITE }, size: 10, name: "Calibri" };
+  subRow.getCell(1).alignment = { horizontal: "left", vertical: "middle", indent: 1 };
+  subRow.height = 18;
+
+  ws1.addRow([]); // spacer
+
+  // Header row
+  const hdrs = ["Company", "Ticker", "Float Cap\n(US$m)", "ADTV\n(US$m)", "Free\nFloat%", "Listing", "Index\nWeight%", "Days\n(Passive)", "Days\n(Total)", "Min Size\nOK?", "Status"];
+  const hdrRow = ws1.addRow(hdrs);
+  hdrRow.height = 32;
+  hdrRow.eachCell(cell => applyHeaderStyle(cell));
+
+  // Data rows grouped by sector
+  let rowIdx = 0;
+  for (const sector of sectors) {
+    const sectorStocks = sortedStocks.filter(s => s.sector === sector);
+    const eligibleInSector = sectorStocks.filter(s => qualified.find(q => q.ticker === s.ticker));
+    if (sectorStocks.length === 0) continue;
+
+    // Sector label row
+    const secRow = ws1.addRow([sector, ...Array(10).fill("")]);
+    ws1.mergeCells(`A${secRow.number}:K${secRow.number}`);
+    secRow.eachCell(cell => applySectorLabelStyle(cell));
+    secRow.height = 16;
+
+    for (const s of sectorStocks) {
+      const isIn   = qualified.find(q => q.ticker === s.ticker);
+      const sw     = stocksWithWeights.find(q => q.ticker === s.ticker);
+      const sizeOk = s.floatMktCap >= cfg.minFloatMktCap;
+      const adtvOk = s.adtvM >= cfg.minADTV;
+      const pf     = isIn && sw ? passiveInflows * sw.indexWeight : null;
+      const tf     = isIn && sw ? totalInflows   * sw.indexWeight : null;
+
+      const dr = ws1.addRow([
+        s.name,
+        s.ticker,
+        s.floatMktCap,
+        s.adtvM,
+        `${(s.freeFlt * 100).toFixed(0)}%`,
+        s.listing,
+        isIn && sw ? parseFloat((sw.indexWeight * 100).toFixed(2)) : "—",
+        pf !== null ? parseFloat((pf / s.adtvM).toFixed(2)) : "—",
+        tf !== null ? parseFloat((tf / s.adtvM).toFixed(2)) : "—",
+        sizeOk && adtvOk ? "✓" : "✗",
+        isIn ? "ELIGIBLE" : (!sizeOk && !adtvOk ? "SIZE+ADTV" : !sizeOk ? "SIZE" : "ADTV"),
+      ]);
+      dr.height = 16;
+
+      dr.eachCell((cell, colNum) => {
+        applyDataStyle(cell, rowIdx, colNum === 1 ? "left" : "center");
+      });
+
+      // Color overrides
+      const statusCell = dr.getCell(11);
+      if (isIn) {
+        statusCell.font = { bold: true, color: { argb: XL.GREEN.replace("FF","FF") }, size: 10, name: "Calibri" };
+      } else {
+        statusCell.font = { bold: true, color: { argb: XL.RED }, size: 10, name: "Calibri" };
+      }
+
+      const sizeCell = dr.getCell(10);
+      sizeCell.font = { bold: true, color: { argb: sizeOk && adtvOk ? XL.TEAL : XL.RED }, size: 10, name: "Calibri" };
+      sizeCell.alignment = { horizontal: "center", vertical: "middle" };
+
+      // Color days-of-trading
+      [8, 9].forEach(col => {
+        const val = parseFloat(dr.getCell(col).value);
+        if (!isNaN(val)) {
+          dr.getCell(col).font = { bold: true, size: 10, name: "Calibri",
+            color: { argb: val > 5 ? XL.RED : val > 2 ? XL.AMBER : XL.TEAL }
+          };
+        }
+      });
+
+      // Float cap color
+      dr.getCell(3).font = { bold: sizeOk, size: 10, name: "Calibri",
+        color: { argb: sizeOk ? XL.TEXT : XL.RED }
+      };
+      dr.getCell(4).font = { bold: adtvOk, size: 10, name: "Calibri",
+        color: { argb: adtvOk ? XL.TEXT : XL.RED }
+      };
+
+      rowIdx++;
+    }
+
+    // Sector median row (eligible only)
+    if (eligibleInSector.length > 0) {
+      const medianCap  = eligibleInSector.map(s => s.floatMktCap).sort((a,b)=>a-b);
+      const medianAdtv = eligibleInSector.map(s => s.adtvM).sort((a,b)=>a-b);
+      const mid = i => i[Math.floor(i.length/2)];
+      const medRow = ws1.addRow([
+        `${sector} Median`, "", mid(medianCap), mid(medianAdtv),
+        "", "", "", "", "", "", `${eligibleInSector.length} eligible`,
+      ]);
+      medRow.height = 17;
+      medRow.eachCell(cell => applyMedianStyle(cell));
+      medRow.getCell(11).font = { bold: true, italic: true, color: { argb: XL.AMBER }, size: 10, name: "Calibri" };
+      rowIdx++;
+    }
+  }
+
+  // Freeze header rows
+  ws1.views[0].state = "frozen";
+  ws1.views[0].ySplit = 4;
+
+  // ══════════════════════════════════════════════════════
+  // SHEET 2 — FLOW ESTIMATES
+  // ══════════════════════════════════════════════════════
+  const ws2 = wb.addWorksheet("Flow Estimates");
+  ws2.views = [{ showGridLines: false }];
+  ws2.columns = [
+    { key: "company", width: 26 },
+    { key: "ticker",  width: 10 },
+    { key: "wt",      width: 12 },
+    { key: "passive", width: 16 },
+    { key: "active",  width: 16 },
+    { key: "total",   width: 16 },
+    { key: "daysP",   width: 15 },
+    { key: "daysT",   width: 15 },
+  ];
+
+  const t2 = ws2.addRow(["MSCI Argentina — Flow Estimates by Constituent", ...Array(7).fill("")]);
+  ws2.mergeCells(`A${t2.number}:H${t2.number}`);
+  applyTitleStyle(t2.getCell(1)); t2.height = 28;
+
+  const s2 = ws2.addRow([
+    `Scenario: ${cfg.label}   |   Passive AUM: $${effectivePassiveAUM}B   |   Active fraction: ${activeFrac.toFixed(1)}x   |   Total flows: $${totalInflows.toFixed(0)}M`,
+    ...Array(7).fill("")
+  ]);
+  ws2.mergeCells(`A${s2.number}:H${s2.number}`);
+  s2.getCell(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: XL.BLUE } };
+  s2.getCell(1).font = { color: { argb: XL.WHITE }, size: 10, name: "Calibri" };
+  s2.getCell(1).alignment = { horizontal: "left", vertical: "middle", indent: 1 };
+  s2.height = 18;
+  ws2.addRow([]);
+
+  const h2 = ws2.addRow(["Company", "Ticker", "Index Wt.\n(%)", "Passive Inflow\n(US$m)", "Active Inflow\n(US$m)", "Total Inflow\n(US$m)", "Days of Trading\n(Passive)", "Days of Trading\n(Total)"]);
+  h2.height = 32;
+  h2.eachCell(cell => applyHeaderStyle(cell));
+
+  let ri2 = 0;
+  [...stocksWithWeights].sort((a, b) => b.floatMktCap - a.floatMktCap).forEach(s => {
     const pf = passiveInflows * s.indexWeight;
     const af = activeInflows  * s.indexWeight;
     const tf = totalInflows   * s.indexWeight;
-    flowRows.push([
-      s.ticker, s.name,
-      `${(s.indexWeight * 100).toFixed(2)}%`,
-      pf.toFixed(1), af.toFixed(1), tf.toFixed(1),
-      (pf / s.adtvM).toFixed(2),
-      (tf / s.adtvM).toFixed(2),
+    const dr = ws2.addRow([
+      s.name, s.ticker,
+      parseFloat((s.indexWeight * 100).toFixed(2)),
+      parseFloat(pf.toFixed(1)),
+      parseFloat(af.toFixed(1)),
+      parseFloat(tf.toFixed(1)),
+      parseFloat((pf / s.adtvM).toFixed(2)),
+      parseFloat((tf / s.adtvM).toFixed(2)),
     ]);
+    dr.height = 16;
+    dr.eachCell((cell, col) => applyDataStyle(cell, ri2, col === 1 ? "left" : "center"));
+    dr.getCell(4).font = { bold: false, color: { argb: XL.LTBLUE.replace("FF","FF") }, size: 10, name: "Calibri" };
+    dr.getCell(5).font = { bold: false, color: { argb: XL.BLUE  }, size: 10, name: "Calibri" };
+    dr.getCell(6).font = { bold: true,  color: { argb: XL.NAVY  }, size: 10, name: "Calibri" };
+    const dp = parseFloat((pf / s.adtvM).toFixed(2));
+    const dt = parseFloat((tf / s.adtvM).toFixed(2));
+    dr.getCell(7).font = { bold: true, size: 10, name: "Calibri", color: { argb: dp>3?XL.RED:dp>1.5?XL.AMBER:XL.TEAL }};
+    dr.getCell(8).font = { bold: true, size: 10, name: "Calibri", color: { argb: dt>5?XL.RED:dt>2?XL.AMBER:XL.TEAL }};
+    ri2++;
   });
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(flowRows), "Flow Breakdown");
 
-  // Sheet 4 — Precedents
-  const precedentRows = [
-    ["Country", "Direction", "Year", "Passive Inflows", "Active Inflows", "Total", "Notes"],
-    ["Argentina", "FM→EM", 2019, "$500M", "$1.2B", "$1.7B", "Prior EM inclusion, capital controls reintroduced 2019"],
-    ["Saudi Arabia", "FM→EM", 2019, "$10B", "$30B", "$40B", "ARAMCO IPO; phased over 2 SAIR cycles"],
-    ["Kuwait", "FM→EM", 2019, "$2.5B", "$5B", "$7.5B", "Gradual rebalancing; high domestic liquidity"],
-    ["UAE/Qatar", "FM→EM", 2014, "$1B ea.", "$2B ea.", "$3B ea.", "Dual listing structure facilitated flows"],
-    ["Pakistan", "FM→EM", 2017, "$600M", "$1B", "$1.6B", "Downgraded back to FM in 2021"],
-    ["Greece", "EM→DM", 2013, "$1.2B out", "$2B out", "$3.2B out", "Outflows due to downgrade"],
+  // Total row
+  const totRow = ws2.addRow([
+    "TOTAL", "",
+    100,
+    parseFloat(passiveInflows.toFixed(1)),
+    parseFloat(activeInflows.toFixed(1)),
+    parseFloat(totalInflows.toFixed(1)),
+    "", ""
+  ]);
+  totRow.height = 18;
+  totRow.eachCell(cell => applyMedianStyle(cell));
+  totRow.getCell(4).font = { bold: true, color: { argb: XL.LTBLUE }, size: 10, name: "Calibri" };
+  totRow.getCell(5).font = { bold: true, color: { argb: "FFADD4FF" }, size: 10, name: "Calibri" };
+  totRow.getCell(6).font = { bold: true, color: { argb: XL.AMBER  }, size: 10, name: "Calibri" };
+
+  ws2.views[0].state = "frozen";
+  ws2.views[0].ySplit = 4;
+
+  // ══════════════════════════════════════════════════════
+  // SHEET 3 — SUMMARY / PARAMETERS
+  // ══════════════════════════════════════════════════════
+  const ws3 = wb.addWorksheet("Summary");
+  ws3.views = [{ showGridLines: false }];
+  ws3.columns = [{ width: 28 }, { width: 22 }, { width: 14 }];
+
+  const addParam = (label, value, bold = false) => {
+    const r = ws3.addRow([label, value, ""]);
+    r.height = 17;
+    r.getCell(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: XL.LTGRAY } };
+    r.getCell(1).font = { color: { argb: XL.GRAY }, size: 10, name: "Calibri" };
+    r.getCell(1).border = { bottom: { style: "hair", color: { argb: XL.MIDGRAY } } };
+    r.getCell(1).alignment = { horizontal: "left", vertical: "middle", indent: 1 };
+    r.getCell(2).font = { bold, color: { argb: XL.NAVY }, size: 11, name: "Calibri" };
+    r.getCell(2).alignment = { horizontal: "left", vertical: "middle" };
+    r.getCell(2).border = { bottom: { style: "hair", color: { argb: XL.MIDGRAY } } };
+  };
+
+  const t3 = ws3.addRow(["MSCI Argentina Simulation — Parameters & Flows", "", ""]);
+  ws3.mergeCells(`A${t3.number}:C${t3.number}`);
+  applyTitleStyle(t3.getCell(1)); t3.height = 28;
+  ws3.addRow([]);
+
+  addParam("SCENARIO",              cfg.label, true);
+  addParam("Timeline",              cfg.timeline);
+  addParam("Passive AUM tracked",   `$${effectivePassiveAUM}B`);
+  addParam("Argentina est. weight", `${(cfg.argWeight * 100).toFixed(3)}%`);
+  addParam("Active / Passive fraction", `${activeFrac.toFixed(2)}×`);
+  addParam("Min Float Mkt Cap",     `$${cfg.minFloatMktCap >= 1000 ? (cfg.minFloatMktCap/1000).toFixed(1)+"B" : cfg.minFloatMktCap+"M"}`);
+  addParam("Min ADTV (3M avg)",     `$${cfg.minADTV}M / day`);
+  addParam("Eligible constituents", `${qualified.length} of ${STOCKS.length}`);
+  ws3.addRow([]);
+
+  const fhRow = ws3.addRow(["FLOW ESTIMATES", "", ""]);
+  ws3.mergeCells(`A${fhRow.number}:C${fhRow.number}`);
+  fhRow.getCell(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: XL.BLUE } };
+  fhRow.getCell(1).font = { bold: true, color: { argb: XL.WHITE }, size: 10, name: "Calibri" };
+  fhRow.getCell(1).alignment = { horizontal: "left", vertical: "middle", indent: 1 };
+  fhRow.height = 18;
+
+  addParam("Passive Inflows", `$${passiveInflows.toFixed(0)}M`);
+  addParam("Active Inflows",  `$${activeInflows.toFixed(0)}M`);
+  addParam("Total Inflows",   `$${totalInflows.toFixed(0)}M`, true);
+  addParam("Analyst consensus range", `$${(cfg.total_flows_low/1000).toFixed(1)}B – $${(cfg.total_flows_high/1000).toFixed(1)}B`);
+
+  // ══════════════════════════════════════════════════════
+  // SHEET 4 — PRECEDENTS
+  // ══════════════════════════════════════════════════════
+  const ws4 = wb.addWorksheet("Precedents");
+  ws4.views = [{ showGridLines: false }];
+  ws4.columns = [
+    { width: 16 }, { width: 10 }, { width: 8 },
+    { width: 15 }, { width: 15 }, { width: 14 }, { width: 40 }
   ];
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(precedentRows), "Precedents");
 
-  const wbout = XLSX.write(wb, { bookType: "xlsx", type: "array" });
-  const blob = new Blob([wbout], { type: "application/octet-stream" });
-  downloadBlob(blob, `LS_MSCI_Argentina_${scenario}_${new Date().toISOString().slice(0,10)}.xlsx`);
+  const t4 = ws4.addRow(["MSCI Reclassification Historical Precedents", "", "", "", "", "", ""]);
+  ws4.mergeCells(`A${t4.number}:G${t4.number}`);
+  applyTitleStyle(t4.getCell(1)); t4.height = 28;
+  ws4.addRow([]);
+
+  const h4 = ws4.addRow(["Country", "Direction", "Year", "Passive Inflows", "Active Inflows", "Total", "Notes"]);
+  h4.height = 22;
+  h4.eachCell(cell => applyHeaderStyle(cell));
+
+  const precData = [
+    ["Argentina",    "FM→EM", 2019, "$500M",     "$1.2B",   "$1.7B",     "Prior EM inclusion — capital controls reintroduced 2019"],
+    ["Saudi Arabia", "FM→EM", 2019, "$10B",       "$30B",    "$40B",      "ARAMCO IPO; phased over 2 SAIR cycles"],
+    ["Kuwait",       "FM→EM", 2019, "$2.5B",      "$5B",     "$7.5B",     "Gradual rebalancing; high domestic liquidity"],
+    ["UAE / Qatar",  "FM→EM", 2014, "$1B ea.",    "$2B ea.", "$3B ea.",   "Dual listing structure facilitated flows"],
+    ["Pakistan",     "FM→EM", 2017, "$600M",      "$1B",     "$1.6B",     "Downgraded back to FM in 2021"],
+    ["Greece",       "EM→DM", 2013, "$1.2B out",  "$2B out", "$3.2B out", "Outflows due to downgrade"],
+  ];
+  precData.forEach((row, ri) => {
+    const dr = ws4.addRow(row);
+    dr.height = 17;
+    dr.eachCell((cell, col) => applyDataStyle(cell, ri, col <= 2 ? "left" : "center"));
+    // Argentina highlight
+    if (ri === 0) {
+      dr.getCell(1).font = { bold: true, color: { argb: XL.TEAL }, size: 10, name: "Calibri" };
+      dr.getCell(6).font = { bold: true, color: { argb: XL.TEAL }, size: 10, name: "Calibri" };
+    }
+    // Direction badge color
+    const dir = row[1];
+    dr.getCell(2).font = {
+      bold: true, size: 10, name: "Calibri",
+      color: { argb: dir.includes("DM") ? XL.RED : XL.TEAL }
+    };
+  });
+
+  // ── Generate and download ──
+  const buffer = await wb.xlsx.writeBuffer();
+  downloadBlob(
+    new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }),
+    `LS_MSCI_Argentina_${scenario}_${new Date().toISOString().slice(0,10)}.xlsx`
+  );
 }
 
 function exportPDF({ scenario, cfg, qualified, stocksWithWeights, passiveInflows, activeInflows, totalInflows, effectivePassiveAUM, activeFrac }) {
-  const doc = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4" });
-  const LS_NAVY = [0, 0, 57];
-  const LS_BLUE = [51, 153, 255];
-  const LS_TEAL = [35, 162, 158];
-  const GRAY    = [120, 144, 168];
-  const WHITE   = [255, 255, 255];
-  const pageW   = doc.internal.pageSize.getWidth();
+  const doc   = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4" });
+  const NAVY  = [0,   0,   57];
+  const BLUE  = [30,  90,  176];
+  const LTBLUE= [51,  153, 255];
+  const TEAL  = [35,  162, 158];
+  const AMBER = [245, 158, 11];
+  const RED   = [220, 50,  50];
+  const WHITE = [255, 255, 255];
+  const GRAY  = [120, 144, 168];
+  const LTGRAY= [244, 247, 251];
+  const TEXT  = [30,  58,  90];
+  const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
+  const scColor = scenario === "frontier" ? AMBER : TEAL;
 
-  // ── Header bar ──
-  doc.setFillColor(...LS_NAVY);
-  doc.rect(0, 0, pageW, 22, "F");
+  // ── Helper: draw page header ──────────────────────────────────────────────
+  function drawHeader(pageTitle) {
+    // Navy bar
+    doc.setFillColor(...NAVY);
+    doc.rect(0, 0, pageW, 18, "F");
+    // Blue accent stripe
+    doc.setFillColor(...BLUE);
+    doc.rect(0, 18, pageW, 2, "F");
 
-  // Logo shapes
-  doc.setFillColor(30, 90, 176);
-  doc.roundedRect(8, 4, 8, 14, 1.5, 1.5, "F");
-  doc.setFillColor(...LS_BLUE);
-  doc.roundedRect(13, 4, 8, 14, 1.5, 1.5, "F");
+    // LS logo bookmarks
+    doc.setFillColor(...BLUE);
+    doc.roundedRect(7, 3, 7, 12, 1, 1, "F");
+    doc.setFillColor(...LTBLUE);
+    doc.roundedRect(11, 3, 7, 12, 1, 1, "F");
 
-  doc.setTextColor(...WHITE);
-  doc.setFontSize(13); doc.setFont("helvetica", "bold");
-  doc.text("LATIN SECURITIES", 25, 11);
-  doc.setFontSize(8); doc.setFont("helvetica", "normal");
-  doc.text("MSCI ARGENTINA INCLUSION SIMULATOR", 25, 16);
+    // Brand text
+    doc.setTextColor(...WHITE);
+    doc.setFontSize(9); doc.setFont("helvetica", "bold");
+    doc.text("LATIN SECURITIES", 22, 9);
+    doc.setFontSize(7); doc.setFont("helvetica", "normal");
+    doc.text("RESEARCH & CAPITAL MARKETS", 22, 14);
 
-  // Scenario badge
-  const badgeColor = scenario === "frontier" ? [245, 158, 11] : [35, 162, 158];
-  doc.setFillColor(...badgeColor);
-  doc.roundedRect(pageW - 60, 6, 52, 10, 2, 2, "F");
-  doc.setTextColor(0, 0, 0);
-  doc.setFontSize(8); doc.setFont("helvetica", "bold");
-  doc.text(`SCENARIO: ${cfg.label.toUpperCase()}`, pageW - 56, 12.5);
+    // Divider
+    doc.setDrawColor(...LTBLUE);
+    doc.setLineWidth(0.3);
+    doc.line(90, 4, 90, 16);
 
-  // ── Summary section ──
-  doc.setTextColor(...LS_NAVY);
-  doc.setFontSize(11); doc.setFont("helvetica", "bold");
-  doc.text("Simulation Parameters", 10, 32);
+    // Page title
+    doc.setTextColor(...WHITE);
+    doc.setFontSize(9); doc.setFont("helvetica", "bold");
+    doc.text(pageTitle, 95, 9);
+    doc.setTextColor(180, 210, 255);
+    doc.setFontSize(7); doc.setFont("helvetica", "normal");
+    doc.text(`Scenario: ${cfg.label}   ·   Passive AUM: $${effectivePassiveAUM}B   ·   Active: ${activeFrac.toFixed(1)}x`, 95, 14);
 
-  const summaryItems = [
-    ["Timeline", cfg.timeline],
-    ["Passive AUM", `$${effectivePassiveAUM}B`],
-    ["Argentina Weight", `${(cfg.argWeight * 100).toFixed(3)}%`],
-    ["Active Fraction", `${activeFrac.toFixed(1)}×`],
-    ["Passive Inflows", `$${passiveInflows.toFixed(0)}M`],
-    ["Active Inflows",  `$${activeInflows.toFixed(0)}M`],
-    ["Total Inflows",   `$${totalInflows.toFixed(0)}M`],
-    ["Analyst Range",   `$${(cfg.total_flows_low/1000).toFixed(1)}B – $${(cfg.total_flows_high/1000).toFixed(1)}B`],
+    // Scenario badge (right)
+    doc.setFillColor(...scColor);
+    doc.roundedRect(pageW - 48, 5, 40, 10, 2, 2, "F");
+    doc.setTextColor(...NAVY);
+    doc.setFontSize(7); doc.setFont("helvetica", "bold");
+    doc.text(cfg.label.toUpperCase(), pageW - 28, 11.5, { align: "center" });
+  }
+
+  // ── Helper: draw page footer ──────────────────────────────────────────────
+  function drawFooter(pageNum, totalPages) {
+    doc.setFillColor(...NAVY);
+    doc.rect(0, pageH - 8, pageW, 8, "F");
+    doc.setTextColor(150, 180, 220);
+    doc.setFontSize(6); doc.setFont("helvetica", "normal");
+    doc.text(
+      `Latin Securities  ·  MSCI Argentina Inclusion Simulator  ·  ${new Date().toLocaleDateString("es-AR")}  ·  For analytical purposes only — not investment advice`,
+      10, pageH - 3
+    );
+    doc.setTextColor(...WHITE);
+    doc.setFontSize(7); doc.setFont("helvetica", "bold");
+    doc.text(`${pageNum} / ${totalPages}`, pageW - 10, pageH - 3, { align: "right" });
+  }
+
+  // ══════════════════════════════════════════════════
+  // PAGE 1 — PARAMETERS + CONSTITUENT TABLE
+  // ══════════════════════════════════════════════════
+  drawHeader("MSCI Argentina Inclusion Simulator — Constituent Analysis");
+
+  // ── KPI cards row ──
+  const cards = [
+    { label: "PASSIVE INFLOWS",  value: `$${passiveInflows.toFixed(0)}M`,  color: LTBLUE },
+    { label: "ACTIVE INFLOWS",   value: `$${activeInflows.toFixed(0)}M`,   color: BLUE   },
+    { label: "TOTAL INFLOWS",    value: `$${totalInflows.toFixed(0)}M`,    color: scColor },
+    { label: "ELIGIBLE STOCKS",  value: `${qualified.length} / ${STOCKS.length}`, color: TEAL },
+    { label: "ANALYST RANGE",    value: `$${(cfg.total_flows_low/1000).toFixed(1)}–$${(cfg.total_flows_high/1000).toFixed(1)}B`, color: AMBER },
+    { label: "SIZE THRESHOLD",   value: `$${cfg.minFloatMktCap >= 1000 ? (cfg.minFloatMktCap/1000).toFixed(1)+"B" : cfg.minFloatMktCap+"M"}`, color: GRAY },
+    { label: "ADTV THRESHOLD",   value: `$${cfg.minADTV}M/day`,            color: GRAY   },
+    { label: "ARG. INDEX WEIGHT",value: `${(cfg.argWeight*100).toFixed(3)}%`, color: NAVY },
   ];
-
-  const colW = (pageW - 20) / 4;
-  summaryItems.forEach((item, i) => {
-    const col = i % 4, row = Math.floor(i / 4);
-    const x = 10 + col * colW, y = 38 + row * 16;
-    doc.setFillColor(232, 238, 246);
-    doc.roundedRect(x, y, colW - 3, 13, 1, 1, "F");
-    doc.setTextColor(...GRAY); doc.setFontSize(6.5); doc.setFont("helvetica", "normal");
-    doc.text(item[0].toUpperCase(), x + 3, y + 5);
-    doc.setTextColor(...LS_NAVY); doc.setFontSize(9); doc.setFont("helvetica", "bold");
-    doc.text(item[1], x + 3, y + 11);
+  const cardW = (pageW - 20) / 8;
+  cards.forEach((card, i) => {
+    const x = 10 + i * cardW;
+    // card bg
+    doc.setFillColor(...LTGRAY);
+    doc.roundedRect(x, 23, cardW - 1.5, 14, 1, 1, "F");
+    // left accent bar
+    doc.setFillColor(...card.color);
+    doc.roundedRect(x, 23, 1.5, 14, 0.5, 0.5, "F");
+    // label
+    doc.setTextColor(...GRAY); doc.setFontSize(5.2); doc.setFont("helvetica", "bold");
+    doc.text(card.label, x + 3.5, 28);
+    // value
+    doc.setTextColor(...card.color); doc.setFontSize(8); doc.setFont("helvetica", "bold");
+    doc.text(card.value, x + 3.5, 34);
   });
 
-  // ── Eligible Constituents table ──
-  doc.setTextColor(...LS_NAVY);
-  doc.setFontSize(11); doc.setFont("helvetica", "bold");
-  doc.text("Eligible Constituents", 10, 76);
+  // ── Section title ──
+  doc.setFillColor(...BLUE);
+  doc.rect(10, 40, pageW - 20, 6, "F");
+  doc.setTextColor(...WHITE); doc.setFontSize(7); doc.setFont("helvetica", "bold");
+  doc.text("ELIGIBLE CONSTITUENTS — ELIGIBILITY SCREENING", 13, 44.5);
 
-  const totalFloatCap = qualified.reduce((a, s) => a + s.floatMktCap, 0);
-  autoTable(doc, {
-    startY: 80,
-    head: [["Ticker", "Company", "Sector", "Float Cap", "ADTV", "Free Float", "Index Wt.", "Days (Passive)", "Days (Total)", "Status"]],
-    body: STOCKS.sort((a, b) => b.floatMktCap - a.floatMktCap).map(s => {
+  // ── Sector-grouped constituent table ──
+  const sectors = [...new Set([...STOCKS].sort((a,b)=>b.floatMktCap-a.floatMktCap).map(s => s.sector))];
+  const tableBody = [];
+  const sectorRowIndices = [];
+
+  sectors.forEach(sector => {
+    const sectorStocks = [...STOCKS].sort((a,b)=>b.floatMktCap-a.floatMktCap).filter(s=>s.sector===sector);
+    if (!sectorStocks.length) return;
+
+    // Sector label
+    sectorRowIndices.push({ idx: tableBody.length, label: sector });
+    tableBody.push([{ content: sector, colSpan: 10, styles: {
+      fillColor: [204, 217, 240], textColor: NAVY,
+      fontStyle: "bold", fontSize: 6.5, cellPadding: 2,
+    }}]);
+
+    sectorStocks.forEach(s => {
       const isIn = qualified.find(q => q.ticker === s.ticker);
       const sw   = stocksWithWeights.find(q => q.ticker === s.ticker);
-      const pf   = isIn && sw ? passiveInflows * sw.indexWeight : 0;
-      const tf   = isIn && sw ? totalInflows * sw.indexWeight : 0;
-      return [
-        s.ticker, s.name.length > 22 ? s.name.slice(0,22)+"…" : s.name,
-        s.sector, fmt(s.floatMktCap), `$${s.adtvM}M`,
-        `${(s.freeFlt*100).toFixed(0)}%`,
+      const pf   = isIn && sw ? passiveInflows * sw.indexWeight : null;
+      const tf   = isIn && sw ? totalInflows   * sw.indexWeight : null;
+      tableBody.push([
+        s.ticker,
+        s.name.length > 24 ? s.name.slice(0, 24) + "…" : s.name,
+        fmt(s.floatMktCap),
+        `$${s.adtvM}M`,
+        `${(s.freeFlt * 100).toFixed(0)}%`,
+        s.listing,
         isIn && sw ? fmtPct(sw.indexWeight) : "—",
-        isIn && sw ? (pf / s.adtvM).toFixed(1)+"d" : "—",
-        isIn && sw ? (tf / s.adtvM).toFixed(1)+"d" : "—",
-        isIn ? "ELIGIBLE" : "EXCLUDED",
-      ];
-    }),
-    headStyles: { fillColor: LS_NAVY, textColor: WHITE, fontSize: 7, fontStyle: "bold" },
-    bodyStyles: { fontSize: 7, textColor: [30, 40, 60] },
-    alternateRowStyles: { fillColor: [245, 248, 252] },
-    didParseCell: (data) => {
-      if (data.section === "body") {
-        const val = data.cell.raw;
-        if (val === "ELIGIBLE")  { data.cell.styles.textColor = [35, 162, 158]; data.cell.styles.fontStyle = "bold"; }
-        if (val === "EXCLUDED")  { data.cell.styles.textColor = [220, 50, 50]; }
-        if (typeof val === "string" && val.endsWith("d") && parseFloat(val) > 5)
-          data.cell.styles.textColor = [220, 50, 50];
-        if (typeof val === "string" && val.endsWith("d") && parseFloat(val) > 2 && parseFloat(val) <= 5)
-          data.cell.styles.textColor = [220, 140, 0];
-      }
-    },
-    margin: { left: 10, right: 10 },
+        pf !== null ? (pf / s.adtvM).toFixed(1) + "d" : "—",
+        tf !== null ? (tf / s.adtvM).toFixed(1) + "d" : "—",
+        isIn ? "ELIGIBLE" : "EXCL.",
+      ]);
+    });
   });
 
-  // ── Page 2: Flow Breakdown ──
+  autoTable(doc, {
+    startY: 47,
+    head: [["Ticker", "Company", "Float Cap\n(US$m)", "ADTV\n(US$m)", "Free\nFloat%", "Listing", "Index\nWt.%", "Days\n(Pass.)", "Days\n(Total)", "Status"]],
+    body: tableBody,
+    headStyles: {
+      fillColor: NAVY, textColor: WHITE,
+      fontSize: 6.5, fontStyle: "bold",
+      halign: "center", valign: "middle",
+      cellPadding: { top: 2, bottom: 2, left: 2, right: 2 },
+    },
+    bodyStyles: { fontSize: 6.5, textColor: TEXT, cellPadding: 1.8 },
+    alternateRowStyles: { fillColor: LTGRAY },
+    columnStyles: {
+      0: { halign: "center", fontStyle: "bold", cellWidth: 14 },
+      1: { halign: "left",   cellWidth: 40 },
+      2: { halign: "right",  cellWidth: 20 },
+      3: { halign: "right",  cellWidth: 18 },
+      4: { halign: "center", cellWidth: 14 },
+      5: { halign: "center", cellWidth: 14 },
+      6: { halign: "center", cellWidth: 16 },
+      7: { halign: "center", cellWidth: 18 },
+      8: { halign: "center", cellWidth: 18 },
+      9: { halign: "center", cellWidth: 16 },
+    },
+    didParseCell(data) {
+      if (data.section !== "body" || data.row.raw?.[0]?.colSpan) return;
+      const val = String(data.cell.raw ?? "");
+      const col = data.column.index;
+      // Status
+      if (col === 9) {
+        data.cell.styles.fontStyle = "bold";
+        data.cell.styles.textColor = val === "ELIGIBLE" ? TEAL : RED;
+      }
+      // Float Cap color if below threshold
+      if (col === 2) {
+        const stock = [...STOCKS].sort((a,b)=>b.floatMktCap-a.floatMktCap)[data.row.index];
+        // no easy way to correlate — handled by fillColor below
+      }
+      // Days of trading color
+      if ((col === 7 || col === 8) && val.endsWith("d")) {
+        const n = parseFloat(val);
+        data.cell.styles.fontStyle = "bold";
+        data.cell.styles.textColor = n > 5 ? RED : n > 2 ? AMBER : TEAL;
+      }
+    },
+    didDrawCell(data) {
+      // Sector row left accent bar
+      if (data.section === "body" && data.row.raw?.[0]?.colSpan && data.column.index === 0) {
+        doc.setFillColor(...BLUE);
+        doc.rect(data.cell.x, data.cell.y, 1.5, data.cell.height, "F");
+      }
+    },
+    margin: { left: 10, right: 10, bottom: 12 },
+    tableLineColor: [220, 230, 240],
+    tableLineWidth: 0.1,
+  });
+
+  // ══════════════════════════════════════════════════
+  // PAGE 2 — FLOW BREAKDOWN + ANALYST CONSENSUS
+  // ══════════════════════════════════════════════════
   doc.addPage();
-  doc.setFillColor(...LS_NAVY);
-  doc.rect(0, 0, pageW, 14, "F");
-  doc.setTextColor(...WHITE); doc.setFontSize(10); doc.setFont("helvetica", "bold");
-  doc.text("LATIN SECURITIES  //  Flow Breakdown by Constituent", 10, 9);
+  drawHeader("Flow Breakdown by Constituent");
+
+  // ── Section bar ──
+  doc.setFillColor(...BLUE);
+  doc.rect(10, 23, pageW - 20, 6, "F");
+  doc.setTextColor(...WHITE); doc.setFontSize(7); doc.setFont("helvetica", "bold");
+  doc.text("ESTIMATED INFLOWS — PASSIVE · ACTIVE · TOTAL · DAYS OF TRADING IMPACT", 13, 27.5);
 
   autoTable(doc, {
-    startY: 20,
-    head: [["Ticker", "Company", "Index Wt. %", "Passive Inflow", "Active Inflow", "Total Inflow", "Days (Passive)", "Days (Total)"]],
-    body: stocksWithWeights.sort((a, b) => b.floatMktCap - a.floatMktCap).map(s => {
+    startY: 30,
+    head: [["Ticker", "Company", "Index Wt.%", "Passive Inflow\n(US$m)", "Active Inflow\n(US$m)", "Total Inflow\n(US$m)", "Days\n(Passive)", "Days\n(Total)"]],
+    body: [...stocksWithWeights].sort((a, b) => b.floatMktCap - a.floatMktCap).map(s => {
       const pf = passiveInflows * s.indexWeight;
       const af = activeInflows  * s.indexWeight;
       const tf = totalInflows   * s.indexWeight;
       return [
-        s.ticker, s.name.length > 28 ? s.name.slice(0,28)+"…" : s.name,
+        s.ticker,
+        s.name.length > 28 ? s.name.slice(0, 28) + "…" : s.name,
         fmtPct(s.indexWeight),
-        `$${pf.toFixed(1)}M`, `$${af.toFixed(1)}M`, `$${tf.toFixed(1)}M`,
-        (pf / s.adtvM).toFixed(2)+"d", (tf / s.adtvM).toFixed(2)+"d",
+        `$${pf.toFixed(1)}M`,
+        `$${af.toFixed(1)}M`,
+        `$${tf.toFixed(1)}M`,
+        (pf / s.adtvM).toFixed(2) + "d",
+        (tf / s.adtvM).toFixed(2) + "d",
       ];
     }),
-    headStyles: { fillColor: LS_NAVY, textColor: WHITE, fontSize: 8, fontStyle: "bold" },
-    bodyStyles: { fontSize: 8, textColor: [30, 40, 60] },
-    alternateRowStyles: { fillColor: [245, 248, 252] },
-    margin: { left: 10, right: 10 },
+    // Total row
+    foot: [[
+      "TOTAL", "",
+      "100.00%",
+      `$${passiveInflows.toFixed(1)}M`,
+      `$${activeInflows.toFixed(1)}M`,
+      `$${totalInflows.toFixed(1)}M`,
+      "", "",
+    ]],
+    headStyles: {
+      fillColor: NAVY, textColor: WHITE, fontSize: 7, fontStyle: "bold",
+      halign: "center", valign: "middle",
+      cellPadding: { top: 2, bottom: 2, left: 2, right: 2 },
+    },
+    footStyles: {
+      fillColor: NAVY, textColor: WHITE, fontSize: 7.5, fontStyle: "bold",
+      halign: "center",
+    },
+    bodyStyles: { fontSize: 7, textColor: TEXT, cellPadding: 1.8 },
+    alternateRowStyles: { fillColor: LTGRAY },
+    columnStyles: {
+      0: { halign: "center", fontStyle: "bold", cellWidth: 16 },
+      1: { halign: "left",   cellWidth: 50 },
+      2: { halign: "center", cellWidth: 20 },
+      3: { halign: "right",  cellWidth: 28, textColor: LTBLUE },
+      4: { halign: "right",  cellWidth: 28, textColor: BLUE },
+      5: { halign: "right",  cellWidth: 28, fontStyle: "bold" },
+      6: { halign: "center", cellWidth: 20 },
+      7: { halign: "center", cellWidth: 20 },
+    },
+    didParseCell(data) {
+      if (data.section !== "body") return;
+      const val = String(data.cell.raw ?? "");
+      const col = data.column.index;
+      if ((col === 6 || col === 7) && val.endsWith("d")) {
+        const n = parseFloat(val);
+        data.cell.styles.fontStyle = "bold";
+        data.cell.styles.textColor = n > 5 ? RED : n > 2 ? AMBER : TEAL;
+      }
+      if (col === 5) {
+        data.cell.styles.fontStyle = "bold";
+        data.cell.styles.textColor = scColor;
+      }
+    },
+    margin: { left: 10, right: 10, bottom: 12 },
+    tableLineColor: [220, 230, 240],
+    tableLineWidth: 0.1,
   });
 
-  // Analyst consensus box
-  const ay = doc.lastAutoTable.finalY + 10;
-  doc.setFillColor(232, 238, 246);
-  doc.roundedRect(10, ay, pageW - 20, 36, 2, 2, "F");
-  doc.setTextColor(...LS_NAVY); doc.setFontSize(8); doc.setFont("helvetica", "bold");
-  doc.text("ANALYST CONSENSUS ESTIMATES", 14, ay + 7);
+  // ── Analyst consensus panel ──
+  const panelY = doc.lastAutoTable.finalY + 6;
+  const panelH = 26;
   const analysts = [
-    ["JPMorgan (2024)", "$200M–$400M FM", "~$1B EM passive"],
-    ["Goldman Sachs",   "$150M–$350M FM", "$800M–$2.0B EM"],
-    ["UBS / Citi",      "$200M–$500M FM", "$1.0B–$2.5B EM"],
-    ["Latam Advisors",  "$300M–$700M FM", "$1.5B–$3.0B EM (incl. active)"],
+    { src: "JPMorgan (2024)", fm: "$200M–$400M", em: "~$1B EM passive" },
+    { src: "Goldman Sachs",   fm: "$150M–$350M", em: "$800M–$2.0B EM" },
+    { src: "UBS / Citi",      fm: "$200M–$500M", em: "$1.0B–$2.5B EM" },
+    { src: "Latam Advisors",  fm: "$300M–$700M", em: "$1.5B–$3.0B EM" },
   ];
+  const colW2 = (pageW - 20) / analysts.length;
+
+  // Panel header
+  doc.setFillColor(...BLUE);
+  doc.rect(10, panelY, pageW - 20, 6, "F");
+  doc.setTextColor(...WHITE); doc.setFontSize(7); doc.setFont("helvetica", "bold");
+  doc.text("ANALYST CONSENSUS ESTIMATES", 13, panelY + 4.5);
+
+  // Panel body
+  doc.setFillColor(...LTGRAY);
+  doc.rect(10, panelY + 6, pageW - 20, panelH, "F");
+
   analysts.forEach((a, i) => {
-    const x = 14 + i * (pageW - 28) / 4;
-    doc.setTextColor(...GRAY); doc.setFontSize(6.5); doc.setFont("helvetica", "bold");
-    doc.text(a[0], x, ay + 16);
-    doc.setTextColor([245,158,11]); doc.setFontSize(7);
-    doc.text(a[1], x, ay + 22);
-    doc.setTextColor(...LS_TEAL);
-    doc.text(a[2], x, ay + 28);
+    const x = 10 + i * colW2;
+    // vertical divider (except first)
+    if (i > 0) {
+      doc.setDrawColor(...[204, 217, 240]);
+      doc.setLineWidth(0.3);
+      doc.line(x, panelY + 6, x, panelY + 6 + panelH);
+    }
+    doc.setTextColor(...GRAY); doc.setFontSize(7); doc.setFont("helvetica", "bold");
+    doc.text(a.src, x + 4, panelY + 13);
+    doc.setFontSize(6); doc.setFont("helvetica", "normal");
+    doc.setTextColor(...GRAY);
+    doc.text("FM:", x + 4, panelY + 19);
+    doc.setTextColor(...AMBER); doc.setFont("helvetica", "bold");
+    doc.text(a.fm, x + 12, panelY + 19);
+    doc.setTextColor(...GRAY); doc.setFont("helvetica", "normal");
+    doc.text("EM:", x + 4, panelY + 25);
+    doc.setTextColor(...TEAL); doc.setFont("helvetica", "bold");
+    doc.text(a.em, x + 12, panelY + 25);
   });
 
-  // ── Footer ──
-  const pages = doc.getNumberOfPages();
-  for (let p = 1; p <= pages; p++) {
+  // Border around panel
+  doc.setDrawColor(...NAVY);
+  doc.setLineWidth(0.4);
+  doc.rect(10, panelY, pageW - 20, panelH + 6);
+
+  // ══════════════════════════════════════════════════
+  // FOOTERS on all pages
+  // ══════════════════════════════════════════════════
+  const totalPages = doc.getNumberOfPages();
+  for (let p = 1; p <= totalPages; p++) {
     doc.setPage(p);
-    doc.setFontSize(6.5); doc.setTextColor(...GRAY);
-    doc.text(
-      "Latin Securities · MSCI Argentina Simulation · For analytical purposes only · Not investment advice · " + new Date().toLocaleDateString("es-AR"),
-      10, doc.internal.pageSize.getHeight() - 5
-    );
-    doc.text(`${p} / ${pages}`, pageW - 15, doc.internal.pageSize.getHeight() - 5);
+    drawFooter(p, totalPages);
   }
 
   doc.save(`LS_MSCI_Argentina_${scenario}_${new Date().toISOString().slice(0,10)}.pdf`);
