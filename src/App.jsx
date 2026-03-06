@@ -3,6 +3,18 @@ import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 
+// Helper: triggers a file download from a Blob
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 // ─── Data ────────────────────────────────────────────────────────────────────
 const STOCKS = [
   { ticker: "YPF",  name: "YPF Sociedad Anónima",           sector: "Energy",              floatMktCap: 7240, adtvM: 42.1, freeFlt: 0.49, listing: "ADR",    domestic: true  },
@@ -140,7 +152,9 @@ function exportExcel({ scenario, cfg, qualified, stocksWithWeights, passiveInflo
   ];
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(precedentRows), "Precedents");
 
-  XLSX.writeFile(wb, `LS_MSCI_Argentina_${scenario}_${new Date().toISOString().slice(0,10)}.xlsx`);
+  const wbout = XLSX.write(wb, { bookType: "xlsx", type: "array" });
+  const blob = new Blob([wbout], { type: "application/octet-stream" });
+  downloadBlob(blob, `LS_MSCI_Argentina_${scenario}_${new Date().toISOString().slice(0,10)}.xlsx`);
 }
 
 function exportPDF({ scenario, cfg, qualified, stocksWithWeights, passiveInflows, activeInflows, totalInflows, effectivePassiveAUM, activeFrac }) {
